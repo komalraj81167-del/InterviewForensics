@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Environment variables / API keys
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Testing / cache
+.pytest_cache/
+
+# Project data
+data/*
+!data/.gitkeep
+
+# Interview recordings
+*.mp3
+*.wav
+*.mp4
+*.m4a
+*.webm
+
+# Logs
+*.log
