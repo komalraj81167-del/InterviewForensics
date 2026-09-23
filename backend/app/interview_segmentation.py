@@ -159,14 +159,16 @@ Here is the word-level transcript:
 
     return json.loads(result)
 
-
-def build_interview_turns(word_segments, question_result):
+def detect_answer_boundaries(word_segments, question_result):
     """
-    Build question-answer pairs from detected questions.
+    Determine where each candidate answer ends.
 
-    The answer for a question is everything between
-    the end of that question and the beginning of
-    the next question.
+    Question boundaries are already detected by detect_questions().
+    Gemini now examines the text between questions and identifies
+    which words belong to the candidate's answer.
+
+    The goal is to remove interviewer-style transition/feedback
+    that occurs before the next question.
     """
 
     questions = question_result.get(
@@ -174,9 +176,7 @@ def build_interview_turns(word_segments, question_result):
         []
     )
 
-
-    turns = []
-
+    refined_questions = []
 
     for i, question in enumerate(questions):
 
@@ -188,58 +188,254 @@ def build_interview_turns(word_segments, question_result):
             "question_end_id"
         ]
 
+        # --------------------------------------------------
+        # Determine the region after this question
+        # and before the next question.
+        # --------------------------------------------------
 
-        # Determine where the answer ends.
+        answer_start_id = question_end_id + 1
+
         if i + 1 < len(questions):
 
             next_question_start_id = questions[
                 i + 1
             ]["question_start_id"]
 
-            answer_end_id = next_question_start_id - 1
+            region_end_id = next_question_start_id - 1
 
         else:
 
-            # Last question continues until
-            # the end of the transcript.
-            answer_end_id = len(word_segments) - 1
+            region_end_id = len(word_segments) - 1
 
+        if answer_start_id > region_end_id:
 
-        # Candidate answer begins after
-        # the interviewer question.
-        answer_start_id = question_end_id + 1
+            refined_questions.append({
+                "question_start_id": question_start_id,
+                "question_end_id": question_end_id,
+                "answer_start_id": answer_start_id,
+                "answer_end_id": answer_start_id - 1
+            })
 
+            continue
 
-        # Prevent invalid ranges.
-        if answer_start_id > answer_end_id:
+        # --------------------------------------------------
+        # Build numbered words for this region.
+        # --------------------------------------------------
 
-            answer_words = []
+        region_words = []
 
-        else:
+        for word_id in range(
+            answer_start_id,
+            region_end_id + 1
+        ):
 
-            answer_words = word_segments[
-                answer_start_id:answer_end_id + 1
-            ]
+            word = word_segments[word_id]
 
+            region_words.append({
+                "id": word_id,
+                "start": word["start"],
+                "end": word["end"],
+                "word": word["word"]
+            })
+
+        region_text = json.dumps(
+            region_words,
+            indent=2
+        )
+
+        # --------------------------------------------------
+        # Ask Gemini to find the candidate answer end.
+        # --------------------------------------------------
+
+        prompt = f"""
+You are analyzing one section of a simulated interview.
+
+There is only one physical speaker because the candidate
+is also recording the interviewer questions.
+
+The interview question has already been identified.
+
+Your task is to identify the EXACT word ID where the
+candidate's answer ends.
+
+After the candidate finishes answering, there may be
+interviewer-style transition or feedback such as:
+
+- okay
+- okay that's great
+- that's great
+- sure
+- alright
+- then
+- thank you
+- short conversational remarks
+
+These should NOT be included in the candidate answer.
+
+IMPORTANT:
+
+1. Preserve the original transcript.
+2. Do NOT correct Whisper transcription errors.
+3. Do NOT rewrite words.
+4. Do NOT summarize the answer.
+5. The answer must begin at the provided answer_start_id.
+6. The answer must end before obvious interviewer
+   transition/feedback when such transition exists.
+7. If there is no obvious interviewer transition,
+   the answer can end at the final word in the region.
+8. Return ONLY the answer_end_id.
+9. The returned ID must exist in the supplied word list.
+
+Interview question:
+
+{json.dumps(
+    " ".join(
+        word_segments[j]["word"]
+        for j in range(
+            question_start_id,
+            question_end_id + 1
+        )
+    )
+)}
+
+Answer candidate region:
+
+{region_text}
+
+Return exactly this JSON format:
+
+{{
+    "answer_end_id": 123
+}}
+"""
+
+        max_retries = 3
+
+        for attempt in range(max_retries):
+
+            try:
+
+                response = client.models.generate_content(
+                    model="gemini-3.5-flash-lite",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        response_mime_type="application/json"
+                    )
+                )
+
+                break
+
+            except Exception:
+
+                if attempt == max_retries - 1:
+                    raise
+
+                wait_time = 2 ** attempt
+
+                print(
+                    f"Gemini answer-boundary request failed. "
+                    f"Retrying in {wait_time} seconds..."
+                )
+
+                time.sleep(wait_time)
+
+        result = response.text.strip()
+
+        boundary = json.loads(result)
+
+        answer_end_id = boundary.get(
+            "answer_end_id"
+        )
+
+        # --------------------------------------------------
+        # Safety validation
+        # --------------------------------------------------
+
+        if answer_end_id is None:
+
+            answer_end_id = region_end_id
+
+        if (
+            answer_end_id < answer_start_id
+            or answer_end_id > region_end_id
+        ):
+
+            answer_end_id = region_end_id
+
+        refined_questions.append({
+            "question_start_id": question_start_id,
+            "question_end_id": question_end_id,
+            "answer_start_id": answer_start_id,
+            "answer_end_id": answer_end_id
+        })
+
+    return {
+        "questions": refined_questions
+    }
+def build_interview_turns(word_segments, question_result):
+    """
+    Build final question-answer pairs using the refined
+    question and answer boundaries.
+    """
+
+    questions = question_result.get(
+        "questions",
+        []
+    )
+
+    turns = []
+
+    for question in questions:
+
+        question_start_id = question[
+            "question_start_id"
+        ]
+
+        question_end_id = question[
+            "question_end_id"
+        ]
+
+        answer_start_id = question.get(
+            "answer_start_id"
+        )
+
+        answer_end_id = question.get(
+            "answer_end_id"
+        )
 
         question_words = word_segments[
             question_start_id:question_end_id + 1
         ]
 
+        if (
+            answer_start_id is not None
+            and answer_end_id is not None
+            and answer_start_id <= answer_end_id
+        ):
+
+            answer_words = word_segments[
+                answer_start_id:answer_end_id + 1
+            ]
+
+        else:
+
+            answer_words = []
+
+        if not question_words:
+            continue
 
         question_text = " ".join(
             word["word"]
             for word in question_words
         ).strip()
 
-
         answer_text = " ".join(
             word["word"]
             for word in answer_words
         ).strip()
 
-
-        turn = {
+        turns.append({
             "question": question_text,
             "answer": answer_text,
 
@@ -257,15 +453,9 @@ def build_interview_turns(word_segments, question_result):
                 if answer_words
                 else None
             )
-        }
+        })
 
-
-        turns.append(turn)
-
-
-    return turns
-
-
+    return turns  
 def validate_questions(question_result, total_words):
     """
     Validate detected question ranges.

@@ -1,13 +1,12 @@
 from backend.app.transcription import (
     transcribe_audio_with_word_timestamps
 )
-
 from backend.app.interview_segmentation import (
     detect_questions,
+    detect_answer_boundaries,
     build_interview_turns,
     validate_questions
 )
-
 
 file_path = "backend/uploads/mock_interview_01.mp3"
 
@@ -26,7 +25,12 @@ print("\n2. Detecting interview questions...")
 question_result = detect_questions(
     word_segments
 )
+print("\n3. Refining answer boundaries...")
 
+question_result = detect_answer_boundaries(
+    word_segments,
+    question_result
+)
 
 print("\nRAW QUESTION DETECTION")
 print("======================")
@@ -34,7 +38,7 @@ print("======================")
 print(question_result)
 
 
-print("\n3. Validating questions...")
+print("\n4. Validating questions...")
 
 validation = validate_questions(
     question_result,
@@ -60,13 +64,19 @@ else:
     print("No question segmentation errors found.")
 
 
-print("\n4. Building question-answer pairs...")
+print("\n5. Building question-answer pairs...")
 
 turns = build_interview_turns(
     word_segments,
     question_result
 )
+print("\nDETECTED QUESTION COUNT")
+print("=======================")
 
+print(
+    "Total questions:",
+    len(turns)
+)
 
 print("\nINTERVIEW SEGMENTATION")
 print("======================")
